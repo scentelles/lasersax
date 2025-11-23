@@ -16,11 +16,16 @@ Adafruit_TLC5947 tlc = Adafruit_TLC5947(NUM_TLC5947, TLC_CLK, TLC_DAT, TLC_LAT);
 
 char IdToPin[16];
 
+
+TaskHandle_t Task1;
+TaskHandle_t Task2;
+
+
 int count = 0;
 
 // ----------- CONFIG WIFI -------------
-const char* ssid     = "slyzic-hotspot";
-const char* password = "totototo";
+const char* ssid     = "Wifi_Home";
+const char* password = "060877040178";
 
 // ----------- CONFIG ART-NET ----------
 ArtnetWifi artnet;
@@ -35,7 +40,7 @@ uint8_t dmxData[512]; // buffer de DMX reçu (optionnel, pour debug)
 
 
 uint8_t currentMode = 0;
-uint8_t currentStrobe = 0;
+uint8_t currentParam = 0;
 
 // Callback appelé à chaque frame ArtDMX reçue
 void onDmxFrame(uint16_t universe, uint16_t length, uint8_t sequence, uint8_t* data) {
@@ -60,9 +65,9 @@ void onDmxFrame(uint16_t universe, uint16_t length, uint8_t sequence, uint8_t* d
       }
       if(dmxChannel == 1)
       {
-        Serial.print("Switching strobe : ");
+        Serial.print("Param : ");
         Serial.println(val);
-        currentStrobe = val;  
+        currentParam = val;  
       }
       if(dmxChannel >= 2)
       {
@@ -188,7 +193,7 @@ void chaser(int speed) // between 0 and 100
 {
   for (int i = 0; i < NB_LASER; i++) {
     for (int j = 0; j < NB_LASER; j++) {
-      setLaserBrightness(IdToPin[j], (IdToPin[j] == IdToPin[i]) ? 4095 : 0);
+      setLaserBrightness(j, (j == i) ? 4095 : 0);
     }
     tlc.write();
     if(speed > 100)
@@ -239,21 +244,73 @@ void setup() {
   connectWifi();
 
 
-  // Init Art-Net
-  artnet.begin();
-  artnet.setArtDmxCallback(onDmxFrame);
+
+
+
+
+  // Création de la première tâche
+  xTaskCreatePinnedToCore(
+    Task1code,       // Fonction à lancer
+    "Task1",         // Nom
+    4096,            // Stack size
+    NULL,            // Paramètre
+    1,               // Priorité
+    &Task1,          // Handle
+    0                // Core 0
+  );
+
+  // Création de la deuxième tâche
+  xTaskCreatePinnedToCore(
+    Task2code,
+    "Task2",
+    4096,
+    NULL,
+    1,
+    &Task2,
+    1                // Core 1
+  );
+
 
 }
 
-void loop() {
-  /*
-    for (int i = 0; i < 24; i++) {
-      setLaserBrightness(i, 4095);
-    }
-    tlc.write();
-    delay(10);
-  */
 
+void Task1code(void* pvParameters) {
+    // Init Art-Net
+  artnet.begin();
+  artnet.setArtDmxCallback(onDmxFrame);
+
+  for (;;) {
+        artnet.read();
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+  }
+}
+
+void Task2code(void* pvParameters) {
+  for (;;) {
+    
+    if(currentMode > 100)
+    {
+      unsigned long now = millis();
+      float wavelength = 0.02 + (currentMode - 100 ) / 150 ;
+      Serial.println(wavelength);
+      float speed = 2.0 / currentParam;
+      Serial.println(speed);
+      sinWaveEffectBy8(now, speed, wavelength);
+    }
+    else
+    if(currentMode > 50)
+    {
+      chaser(currentParam);
+
+    }    
+    
+
+
+    vTaskDelay(1 / portTICK_PERIOD_MS);
+  }
+}
+
+void loop() {
 
 /*
   // Exemple : fondu global monté/descendu
@@ -272,30 +329,6 @@ void loop() {
     tlc.write();
     delay(10);
   }*/
-
-  unsigned long now = millis();
-
-  // speed = 0.005, wavelength = 0.5 → fluide, pas trop rapide
- // sinWaveEffectBy8(now, 0.001, 0.5);
-/*
-    count++;
-    if(count > currentStrobe *2)
-      count = 0;
-
-    if(count < currentStrobe)
-    {
-        AllLightsOn();
-
-    }
-    else
-    {
-        AllLightsOff();
-    }
-
-*/
-    artnet.read();
-
-    delay(10);
 
     
 }
