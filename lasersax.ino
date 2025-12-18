@@ -4,6 +4,8 @@
 #include <WebServer.h>
 #include <Preferences.h>
 
+#include "bleFootCtrl.h"
+
 #define NUM_TLC5947 1
 
 // Pins ESP32 -> TLC5947
@@ -22,6 +24,10 @@ TaskHandle_t Task1;
 TaskHandle_t Task2;
 
 int count = 0;
+
+// BLE config
+bool useBleMode = false;   // false = wifi/artnet, true = BLE footswitch
+
 
 // ----------- CONFIG WIFI (DEFAULT / USINE) -------------
 // Utilisés seulement si aucune config sauvegardée trouvée
@@ -50,8 +56,7 @@ const uint8_t  NB_DMX_CHANNEL  = 18; //1 : Mode - 2: Param - 3-18 dimmer
 // ----------- DMX BUFFER --------------
 uint8_t dmxData[512];
 
-uint8_t currentMode = 0;
-uint8_t currentParam = 0;
+
 
 // ===================== PERSISTENCE WIFI =====================
 
@@ -342,6 +347,12 @@ void Task2code(void* pvParameters) {
     else if (currentMode > 25) {
       strobe(currentParam);
     }
+    else {
+      if(currentMode == 0)
+        AllLightsOff();
+      if(currentMode == 1)
+        AllLightsOn();
+    }
         
     vTaskDelay(1 / portTICK_PERIOD_MS);
   }
@@ -382,54 +393,115 @@ void setup() {
 
   bool wifiOk = false;
 
-  // 1) Si une config est sauvegardée → on tente en priorité
-  if (staSsidConfig.length() > 0) {
-    Serial.println("loading existing config");
-    wifiOk = connectWifi(staSsidConfig.c_str(), staPassConfig.c_str());
+
+
+
+//=======================================================
+// BLE SETUP
+// ==================== BLE: tentative de connexion au pédalier ====================
+  bleFootCtrlInit();   // lance NimBLE + scan + logique de connexion interne
+
+  Serial.println("Attente de connexion BLE (pédalier) pendant max 8s...");
+  const unsigned long BLE_TIMEOUT = 8000;
+  unsigned long t0 = millis();
+
+  while ((millis() - t0) < BLE_TIMEOUT && !g_connected) {
+    bleFootCtrlLoop();    // laisse le BLE faire ses trucs (scan / connect / retry)
+    delay(10);
   }
 
-  // 2) Sinon, on tente les valeurs "usine"
-  if (!wifiOk) {
-    Serial.println("Loading default wifi setup");
-    wifiOk = connectWifi(DEFAULT_SSID, DEFAULT_PASSWORD);
-    if (wifiOk) {
-      // On peut éventuellement les sauvegarder en tant que config persistante
-      saveWifiConfig(DEFAULT_SSID, DEFAULT_PASSWORD);
-      staSsidConfig = DEFAULT_SSID;
-      staPassConfig = DEFAULT_PASSWORD;
+  if (g_connected) {
+    Serial.println("BLE FootCtrl trouvé - passage en mode BLE");
+    useBleMode = true;
+  } else {
+    Serial.println("Aucun BLE FootCtrl trouvé - mode WiFi/ArtNet");
+    useBleMode = false;
+
+    // 🔴 IMPORTANT : on ARRÊTE le BLE ici
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    if (scan && scan->isScanning()) {
+      Serial.println("Stop scan BLE avant WiFi...");
+      scan->stop();
     }
+  
+
+
+    
   }
 
-  // 3) Si toujours pas de WiFi → on lance l’AP de configuration
-  if (!wifiOk) {
-    startConfigAP();
+
+  if (useBleMode) 
+  {
+    Serial.println(" BLE FootCtrl found - Staying on BLE mode");
   }
 
-  // Création de la première tâche (Art-Net)
-  xTaskCreatePinnedToCore(
-    Task1code,
-    "Task1",
-    4096,
-    NULL,
-    1,
-    &Task1,
-    0
-  );
+  else
+  {
 
-  // Création de la deuxième tâche (effets)
-  xTaskCreatePinnedToCore(
-    Task2code,
-    "Task2",
-    4096,
-    NULL,
-    1,
-    &Task2,
-    1
-  );
+
+    Serial.println("No BLE FootCtrl found - Proceeding with Wifi/artnet mode");
+
+
+
+      // 1) Si une config est sauvegardée → on tente en priorité
+      if (staSsidConfig.length() > 0) {
+        Serial.println("loading existing config");
+        wifiOk = connectWifi(staSsidConfig.c_str(), staPassConfig.c_str());
+      }
+
+      // 2) Sinon, on tente les valeurs "usine"
+      if (!wifiOk) {
+        Serial.println("Loading default wifi setup");
+        wifiOk = connectWifi(DEFAULT_SSID, DEFAULT_PASSWORD);
+        if (wifiOk) {
+          // On peut éventuellement les sauvegarder en tant que config persistante
+          saveWifiConfig(DEFAULT_SSID, DEFAULT_PASSWORD);
+          staSsidConfig = DEFAULT_SSID;
+          staPassConfig = DEFAULT_PASSWORD;
+        }
+      }
+
+      // 3) Si toujours pas de WiFi → on lance l’AP de configuration
+      if (!wifiOk) {
+        startConfigAP();
+      }
+
+      // Création de la première tâche (Art-Net)
+      xTaskCreatePinnedToCore(
+        Task1code,
+        "Task1",
+        4096,
+        NULL,
+        1,
+        &Task1,
+        0
+      );
+
+
+
+  }
+
+        // Création de la deuxième tâche (effets)
+      xTaskCreatePinnedToCore(
+        Task2code,
+        "Task2",
+        4096,
+        NULL,
+        1,
+        &Task2,
+        1
+      );
 }
 
 void loop() {
-  // Gestion éventuelle des requêtes HTTP (si AP de config lancé)
-  server.handleClient();
-  delay(2);
+  if (useBleMode) {
+    // Mode pédalier BLE → on laisse la stack BLE vivre et on traite les events s'il y a une loop dédiée
+    bleFootCtrlLoop();   // si tu veux gérer des timeouts/retry en continu
+  } else {
+    // Mode WiFi / AP de config
+    server.handleClient();
+
+  }
+    delay(2);
+
 }
